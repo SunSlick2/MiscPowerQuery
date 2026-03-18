@@ -1,0 +1,130 @@
+Expression.Error: The name 'Number.Min' wasn't recognized.  Make sure it's spelled correctly.
+
+let
+    /***********************
+     * 1. Same extraction as Step 1 – lines between markers
+     ***********************/
+    NamedRanges      = Excel.CurrentWorkbook(),
+    TSVPathRow       = Table.SelectRows(NamedRanges, each [Name] = "TSVFileFullPath"),
+    TSVPathTable     = if Table.RowCount(TSVPathRow) = 0
+                       then error "Named range 'TSVFileFullPath' not found."
+                       else TSVPathRow{0}[Content],
+    FilePath         = TSVPathTable{0}[Column1],
+
+    FileText         = Text.FromBinary(File.Contents(FilePath)),
+    LinesList        = Lines.FromText(FileText),
+    LinesTable       = Table.FromList(LinesList, Splitter.SplitByNothing(), {"Line"}, null, ExtraValues.Error),
+    LinesWithIndex   = Table.AddIndexColumn(LinesTable, "Index", 0, 1, Int64.Type),
+
+    StartRowTbl      = Table.SelectRows(LinesWithIndex, each Text.Contains([Line], "TRADES AND OPTIONS:")),
+    StartIndex       = if Table.RowCount(StartRowTbl) = 0
+                       then error "Start marker 'TRADES AND OPTIONS:' not found."
+                       else StartRowTbl{0}[Index],
+
+    EndRowTbl        = Table.SelectRows(LinesWithIndex, each Text.Contains([Line], "CURRENCY PAIRS:")),
+    EndIndex         = if Table.RowCount(EndRowTbl) = 0
+                       then error "End marker 'CURRENCY PAIRS:' not found."
+                       else EndRowTbl{0}[Index],
+
+    BetweenMarkers   = Table.SelectRows(
+                          LinesWithIndex,
+                          each [Index] > StartIndex and [Index] < EndIndex
+                       ),
+    DataLines        = Table.RemoveColumns(BetweenMarkers, {"Index"}),
+
+    /***********************
+     * 2. Extract header lines and data lines explicitly
+     *    Row 0: header labels (e.g. Strategy Ref, Ref, ExtRef, ...)
+     *    Row 1: "Unnormalised" row
+     ***********************/
+    HeaderLine1      = DataLines{0}[Line],
+    HeaderLine2      = DataLines{1}[Line],
+    DataLinesOnly    = Table.Skip(DataLines, 2),
+
+    // Split header lines into lists of fields
+    HeaderFields1    = Text.Split(HeaderLine1, "#(tab)"),
+    HeaderFields2    = Text.Split(HeaderLine2, "#(tab)"),
+
+    // Use the smaller of the two counts so they align
+    HeaderColCount   = Number.Min(List.Count(HeaderFields1), List.Count(HeaderFields2)),
+
+    HeaderFields1Trim = List.FirstN(HeaderFields1, HeaderColCount),
+    HeaderFields2Trim = List.FirstN(HeaderFields2, HeaderColCount),
+
+    /***********************
+     * 3. Build combined headers from the two header rows
+     ***********************/
+    CombinedHeadersRaw =
+        List.Transform(
+            {0..HeaderColCount - 1},
+            each
+                let
+                    h1 = Text.Trim(HeaderFields1Trim{_}),
+                    h2 = Text.Trim(HeaderFields2Trim{_}),
+                    combined =
+                        if h2 <> "" then
+                            Text.Combine({h1, h2}, " ")
+                        else
+                            h1
+                in
+                    combined
+        ),
+
+    /***********************
+     * 4. De‑duplicate header names
+     ***********************/
+    DedupHeaders =
+        let
+            list = CombinedHeadersRaw,
+            result =
+                List.Accumulate(
+                    {0..List.Count(list)-1},
+                    [Names = {}, Out = {}],
+                    (state, i) =>
+                        let
+                            currentName   = list{i},
+                            baseName      = if Text.Trim(currentName) = "" then "Column" & Text.From(i+1) else currentName,
+                            occurrences   = List.Count(List.Select(state[Names], (n) => n = baseName)),
+                            newName       = if occurrences = 0 then baseName else baseName & "_" & Text.From(occurrences + 1),
+                            newNamesList  = state[Names] & { newName },
+                            newOutList    = state[Out] & { newName }
+                        in
+                            [Names = newNamesList, Out = newOutList]
+                )
+        in
+            result[Out],
+
+    /***********************
+     * 5. Split all data lines by tab and trim to HeaderColCount columns
+     ***********************/
+    SplitToLists     = Table.AddColumn(
+                          DataLinesOnly,
+                          "Fields",
+                          each Text.Split([Line], "#(tab)")
+                       ),
+    FieldsOnly       = Table.SelectColumns(SplitToLists, {"Fields"}),
+
+    NormalisedLists  =
+        List.Transform(
+            FieldsOnly[Fields],
+            each
+                let
+                    rowList = _,
+                    // pad with nulls if fewer columns, then take first HeaderColCount
+                    padded  =
+                        if List.Count(rowList) < HeaderColCount then
+                            rowList & List.Repeat({null}, HeaderColCount - List.Count(rowList))
+                        else
+                            rowList
+                in
+                    List.FirstN(padded, HeaderColCount)
+        ),
+
+    DataRaw          = Table.FromRows(NormalisedLists, DedupHeaders),
+
+    /***********************
+     * 6. Clean column names
+     ***********************/
+    Cleaned          = Table.TransformColumnNames(DataRaw, each Text.Trim(_))
+in
+    Cleaned
