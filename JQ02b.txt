@@ -1,0 +1,134 @@
+let
+    /***********************
+     * 1. Extraction (Existing Logic)
+     ***********************/
+    NamedRanges      = Excel.CurrentWorkbook(),
+    TSVPathRow       = Table.SelectRows(NamedRanges, each [Name] = "TSVFileFullPath"),
+    TSVPathTable     = if Table.RowCount(TSVPathRow) = 0 then error "Named range 'TSVFileFullPath' not found." else TSVPathRow{0}[Content],
+    FilePath         = TSVPathTable{0}[Column1],
+    FileText         = Text.FromBinary(File.Contents(FilePath)),
+    LinesList        = Lines.FromText(FileText),
+    LinesTable       = Table.FromList(LinesList, Splitter.SplitByNothing(), {"Line"}, null, ExtraValues.Error),
+    LinesWithIndex   = Table.AddIndexColumn(LinesTable, "Index", 0, 1, Int64.Type),
+    StartRowTbl      = Table.SelectRows(LinesWithIndex, each Text.Contains([Line], "TRADES AND OPTIONS:")),
+    StartIndex       = if Table.RowCount(StartRowTbl) = 0 then error "Start marker not found." else StartRowTbl{0}[Index],
+    EndRowTbl        = Table.SelectRows(LinesWithIndex, each Text.Contains([Line], "CURRENCY PAIRS:")),
+    EndIndex         = if Table.RowCount(EndRowTbl) = 0 then error "End marker not found." else EndRowTbl{0}[Index],
+    BetweenMarkers   = Table.SelectRows(LinesWithIndex, each [Index] > StartIndex and [Index] < EndIndex),
+    DataLines        = Table.RemoveColumns(BetweenMarkers, {"Index"}),
+    HeaderLine1      = DataLines{0}[Line],
+    HeaderLine2      = DataLines{1}[Line],
+    DataLinesOnly    = Table.Skip(DataLines, 2),
+    HeaderFields1    = Text.Split(HeaderLine1, "#(tab)"),
+    HeaderFields2    = Text.Split(HeaderLine2, "#(tab)"),
+    
+    HeaderColCount   = List.Min({List.Count(HeaderFields1), List.Count(HeaderFields2)}),
+
+    /***********************
+     * 2. Header & Table Setup
+     ***********************/
+    HeaderFields1Trim = List.FirstN(HeaderFields1, HeaderColCount),
+    HeaderFields2Trim = List.FirstN(HeaderFields2, HeaderColCount),
+    CombinedHeadersRaw = List.Transform({0..HeaderColCount - 1}, each 
+        let h1 = Text.Trim(HeaderFields1Trim{_}), h2 = Text.Trim(HeaderFields2Trim{_}) 
+        in if h2 <> "" then Text.Combine({h1, h2}, " ") else h1
+    ),
+    // FIX: Added 'in' keyword to resolve "Token 'in' expected" error
+    DedupHeaders = 
+        let 
+            list = CombinedHeadersRaw, 
+            result = List.Accumulate({0..List.Count(list)-1}, [Names = {}, Out = {}], (state, i) =>
+                let 
+                    baseName = if Text.Trim(list{i}) = "" then "Column" & Text.From(i+1) else list{i},
+                    occurrences = List.Count(List.Select(state[Names], (n) => n = baseName)),
+                    newName = if occurrences = 0 then baseName else baseName & "_" & Text.From(occurrences + 1)
+                in [Names = state[Names] & { newName }, Out = state[Out] & { newName }])
+        in 
+            result[Out],
+
+    SplitToLists     = Table.AddColumn(DataLinesOnly, "Fields", each Text.Split([Line], "#(tab)")),
+    NormalisedLists  = List.Transform(SplitToLists[Fields], each let padded = if List.Count(_) < HeaderColCount then _ & List.Repeat({null}, HeaderColCount - List.Count(_)) else _ in List.FirstN(padded, HeaderColCount)),
+    DataRaw          = Table.FromRows(NormalisedLists, DedupHeaders),
+    
+    /***********************
+     * 3. Typing & Initial Sort
+     ***********************/
+    Typed = Table.TransformColumnTypes(DataRaw, {
+        {"MTM", type number}, {"Delta (Risk)", type number}, {"Basic Cover", type number}, 
+        {"Gamma (System-Base)", type number}, {"Gamma Add-On Unnormalised", type number}, 
+        {"Vega (Base)", type number}, {"Vega Add-On Unnormalised", type number}, 
+        {"Gamma+Vega Add-On Unnormalised", type number}, {"Constrained", type number}, 
+        {"Constrained_2", type number}, {"Reval Vol", type number}, {"Gamma Vol", type number}, 
+        {"Vega Vol", type number}, {"Notional (BaseCcy)", type number}, {"Notional (QuotedCcy)", type number}
+    }),
+    // Convert to actual Date objects for chronological sorting (ddMMMyy)
+    DateTyped = Table.TransformColumns(Typed, {
+        {"Expiry", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date},
+        {"UL Maturity", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date}
+    }),
+    SortedByExpiry = Table.Sort(DateTyped,{{"Expiry", Order.Ascending}}),
+
+    /***********************
+     * 4. Consolidation Logic
+     ***********************/
+    // FIX: Column names with spaces must use #" " syntax
+    BlankAccum = Table.SelectRows(SortedByExpiry, each [#"Accumulator ExtRef"] = null or [#"Accumulator ExtRef"] = ""),
+    PopulatedAccum = Table.SelectRows(SortedByExpiry, each [#"Accumulator ExtRef"] <> null and [#"Accumulator ExtRef"] <> ""),
+    
+    Grouped = Table.Group(PopulatedAccum, {"Accumulator ExtRef"}, {
+        {"AllRows", each _, type table},
+        // Sums
+        {"MTM", each List.Sum([MTM]), type number},
+        {"Delta (Risk)", each List.Sum([#"Delta (Risk)"]), type number},
+        {"Basic Cover", each List.Sum([#"Basic Cover"]), type number},
+        {"Gamma (System-Base)", each List.Sum([#"Gamma (System-Base)"]), type number},
+        {"Gamma Add-On Unnormalised", each List.Sum([#"Gamma Add-On Unnormalised"]), type number},
+        {"Vega (Base)", each List.Sum([#"Vega (Base)"]), type number},
+        {"Vega Add-On Unnormalised", each List.Sum([#"Vega Add-On Unnormalised"]), type number},
+        {"Gamma+Vega Add-On Unnormalised", each List.Sum([#"Gamma+Vega Add-On Unnormalised"]), type number},
+        {"Constrained", each List.Sum([Constrained]), type number},
+        {"Constrained_2", each List.Sum([Constrained_2]), type number},
+        // Averages
+        {"Reval Vol", each List.Average([#"Reval Vol"]), type number},
+        {"Gamma Vol", each List.Average([#"Gamma Vol"]), type number},
+        {"Vega Vol", each List.Average([#"Vega Vol"]), type number},
+        // Keep from First/Last (Quoted identifiers for spaces)
+        {"Strategy Ref", each _[#"Strategy Ref"]{0}},
+        {"Ccy Pair", each _[#"Ccy Pair"]{0}},
+        {"Base Ccy", each _[#"Base Ccy"]{0}},
+        {"Quoted Ccy", each _[#"Quoted Ccy"]{0}},
+        {"Strike", each _[#"Strike"]{0}},
+        {"Ref", each _[Ref]{0}},
+        {"ExtRef", each _[ExtRef]{0}},
+        {"Reval Rate", each _[#"Reval Rate"]{0}},
+        {"Gamma Vol Tenor", each _[#"Gamma Vol Tenor"]{0}},
+        {"Vega Vol Tenor", each _[#"Vega Vol Tenor"]{0}},
+        {"Expiry", each List.Last([#"Expiry"])},
+        {"UL Maturity", each List.Last([#"UL Maturity"])},
+        {"Barrier 1", each List.First(List.RemoveMatchingItems(_[#"Barrier 1"], {"", null}))},
+        {"Barrier 2", each List.First(List.RemoveMatchingItems(_[#"Barrier 2"], {"", null}))},
+        // A vs B Logic
+        {"JoinedCols", each 
+            let 
+                r1 = _{0}, r2 = _{1},
+                isA1 = if r1[#"Notional (BaseCcy)"] <= r2[#"Notional (BaseCcy)"] then true else false,
+                A = if isA1 then r1 else r2,
+                B = if isA1 then r2 else r1,
+                Join = (f) => Text.From(Record.Field(A, f)) & " / " & Text.From(Record.Field(B, f))
+            in 
+                [BC=Join("Base Ccy Op"), NBC=Join("Notional (BaseCcy)"), QC=Join("Quoted Ccy Op"), NQC=Join("Notional (QuotedCcy)")]
+        }
+    }),
+    
+    ExpandJoined = Table.ExpandRecordColumn(Grouped, "JoinedCols", {"BC", "NBC", "QC", "NQC"}, {"Base Ccy Op", "Notional (BaseCcy)", "Quoted Ccy Op", "Notional (QuotedCcy)"}),
+    
+    /***********************
+     * 5. Final Assembly & Sort
+     ***********************/
+    FinalPopulated = Table.Sort(ExpandJoined, {{"Expiry", Order.Ascending}}),
+    FinalBlank = Table.Sort(BlankAccum, {{"UL Maturity", Order.Ascending}}),
+    Combined = Table.Combine({FinalPopulated, FinalBlank}),
+    // Reorder back to the original header sequence
+    Reordered = Table.ReorderColumns(Combined, DedupHeaders)
+in
+    Reordered
