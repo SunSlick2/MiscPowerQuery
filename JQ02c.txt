@@ -1,0 +1,32 @@
+/***********************
+     * 3. Robust Typing & Initial Sort
+     ***********************/
+    // Helper function to handle (123) as -123
+    CleanNumber = (val) => 
+        let 
+            t = Text.Trim(Text.From(val)),
+            isNeg = Text.StartsWith(t, "(") and Text.EndsWith(t, ")"),
+            cleanT = if isNeg then "-" & Text.Range(t, 1, Text.Length(t) - 2) else t,
+            num = try Number.From(cleanT, "en-US") otherwise 0
+        in num,
+
+    // Apply transformation to all numeric columns
+    NumCols = {
+        "MTM", "Delta (Risk)", "Basic Cover", "Gamma (System-Base)", 
+        "Gamma Add-On Unnormalised", "Vega (Base)", "Vega Add-On Unnormalised", 
+        "Gamma+Vega Add-On Unnormalised", "Constrained", "Constrained_2", 
+        "Reval Vol", "Gamma Vol", "Vega Vol", "Notional (BaseCcy)", "Notional (QuotedCcy)"
+    },
+    
+    // Transform the table using the helper function
+    Typed = Table.TransformColumns(DataRaw, 
+        List.Transform(NumCols, (colName) => {colName, each CleanNumber(_), type number})
+    ),
+
+    // Convert Dates
+    DateTyped = Table.TransformColumns(Typed, {
+        {"Expiry", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date},
+        {"UL Maturity", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date}
+    }),
+
+    SortedByExpiry = Table.Sort(DateTyped,{{"Expiry", Order.Ascending}}),
