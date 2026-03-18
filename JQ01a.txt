@@ -1,0 +1,55 @@
+Sort columns by Expiry ( make sure it is formatted as date) 
+
+Accumulator ExtRef may be blank for a few rows. Wherever Accumulator ExtRef is not blank
+
+For each Accumulator ExtRef, create 1 row showing 
+
+Sum the following fields
+1. MTM
+2. Delta (Risk)
+3. Basic Cover
+4. Gamma (System-Base)
+5. Gamma Add-On Unnormalised
+6. Vega (Base)
+7. Vega Add-On Unnormalised
+8. Gamma+Vega Add-On Unnormalised
+9. Constrained
+10. Constrained
+
+Keep (the are same for same Accumulator ExtRef)
+1. Strategy Ref
+2. Ccy Pair
+3. Base Ccy
+4. Quoted Ccy
+5. Strike
+
+Keep from first row
+1. Ref
+2. ExtRef
+3. Reval Rate
+4. Gamma Vol Tenor
+5. Vega Vol Tenor
+
+Average of following
+1. Reval Vol
+2. Gamma Vol
+3. Vega Vol
+
+Also, Accumulator ExtRef appears for a even number of rows. 
+
+Take value from first two rows and add a column showing (join as text, with delimiter " / ")
+Base Ccy Op from first row / Base Ccy Op from second row
+Notional (BaseCcy) from first row  / Notional (BaseCcy) from first row
+Quoted Ccy Op from first row / Quoted Ccy Op from second row
+Notional (QuotedCcy) from first row  / Notional (QuotedCcy) from first row
+
+Also, 
+Expiry - take last
+UL Maturity - take last
+
+Check first 2 rows and keep whichever of the follwing value that is not blank
+Barrier 1
+Barrier 2
+
+Keep the order of the fields same as the original order. 
+
