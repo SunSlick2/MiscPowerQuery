@@ -1,0 +1,28 @@
+/***********************
+     * 3. Robust Typing & Initial Sort
+     ***********************/
+    // Define the list of columns that should be numbers
+    NumCols = {
+        "MTM", "Delta (Risk)", "Basic Cover", "Gamma (System-Base)", 
+        "Gamma Add-On Unnormalised", "Vega (Base)", "Vega Add-On Unnormalised", 
+        "Gamma+Vega Add-On Unnormalised", "Constrained", "Constrained_2", 
+        "Reval Vol", "Gamma Vol", "Vega Vol", "Notional (BaseCcy)", "Notional (QuotedCcy)"
+    },
+
+    // Transform columns: 
+    // 1. Remove spaces/commas 
+    // 2. Use Number.From with "en-US" culture (which recognizes parentheses)
+    Typed = Table.TransformColumns(DataRaw, 
+        List.Transform(NumCols, (colName) => 
+            {colName, each if _ = null or Text.Trim(_) = "" then 0 else 
+                Number.From(Text.Replace(Text.Trim(_), ",", ""), "en-US"), type number}
+        )
+    ),
+
+    // Convert Dates (ddMMMyy)
+    DateTyped = Table.TransformColumns(Typed, {
+        {"Expiry", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date},
+        {"UL Maturity", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date}
+    }),
+
+    SortedByExpiry = Table.Sort(DateTyped,{{"Expiry", Order.Ascending}}),
