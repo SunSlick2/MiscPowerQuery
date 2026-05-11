@@ -1,0 +1,44 @@
+    // 7. Combination Logic for FX_KOFW
+    #"Process Strategies" = Table.Group(#"Prep Fields", {"STRATEGY"}, {{"Data", each _, type table}}),
+    #"Process Combinations" = Table.AddColumn(#"Process Strategies", "Processed", each 
+        if [STRATEGY] = "FX_KOFW" then 
+            let
+                grouped = Table.Group([Data], {"STRUCT_ID"}, {{"Rows", each _, type table}}),
+                combined = Table.AddColumn(grouped, "Combined", each 
+                    let
+                        rows = [Rows],
+                        rowBC = Table.SelectRows(rows, each [#"B/S"] = "B" and [#"C/P"] = "C"),
+                        rowSP = Table.SelectRows(rows, each [#"B/S"] = "S" and [#"C/P"] = "P"),
+                        rowBP = Table.SelectRows(rows, each [#"B/S"] = "B" and [#"C/P"] = "P"),
+                        rowSC = Table.SelectRows(rows, each [#"B/S"] = "S" and [#"C/P"] = "C"),
+                        isAccu = Table.RowCount(rows) = 2 and Table.RowCount(rowBC) = 1 and Table.RowCount(rowSP) = 1,
+                        isDecu = Table.RowCount(rows) = 2 and Table.RowCount(rowBP) = 1 and Table.RowCount(rowSC) = 1
+                    in
+                        if isAccu then {Record.Combine({rowBC{0}, [Struct = if rowBC{0}[BARRIER0] = 0 then "Accu-g" else "Accu", #"B/S" = "L", BaseNot = rowBC{0}[BaseNot] & "/" & rowSP{0}[BaseNot], #"NB.INT" = rowBC{0}[#"NB.INT"] & "/" & rowSP{0}[#"NB.INT"]]})}
+                        else if isDecu then {Record.Combine({rowBP{0}, [Struct = if rowBP{0}[BARRIER0] = 0 then "Decu-g" else "Decu", #"B/S" = "S", BaseNot = rowBP{0}[BaseNot] & "/" & rowSC{0}[BaseNot], #"NB.INT" = rowBP{0}[#"NB.INT"] & "/" & rowSC{0}[#"NB.INT"]]})}
+                        else Table.ToRecords(rows)
+                )
+            in
+                List.Combine(combined[Combined])
+        else 
+            Table.ToRecords([Data])
+    ),
+    #"Combined Result" = Table.FromRecords(List.Combine(#"Process Combinations"[Processed]), Value.Type(#"Prep Fields")),
+
+    // 8. Final Struct Logic
+    #"Final Struct Logic" = Table.TransformRows(#"Combined Result", (r) =>
+        let 
+            s = if r[STRATEGY] = "FX_EURO" then 
+                    if r[#"B/S"] = "S" and r[#"C/P"] = "P" then "Short-Put"
+                    else if r[#"B/S"] = "S" and r[#"C/P"] = "C" then "Short-Call"
+                    else if r[#"B/S"] = "B" and r[#"C/P"] = "P" then "Long-Put"
+                    else if r[#"B/S"] = "B" and r[#"C/P"] = "C" then "Long-Call"
+                    else "Error"
+                else if r[STRATEGY] = "FX_KOFW" then (if r[Struct] = null then "Error" else r[Struct])
+                else "Error",
+            lowStrike = if List.Contains({"Short-Put", "Long-Put", "Accu", "Accu-g"}, s) then r[Strike] else null,
+            upStrike = if List.Contains({"Short-Call", "Long-Call", "Decu", "Decu-g"}, s) then r[Strike] else null
+        in
+            Record.Combine({r, [Struct = s, #"Lower Strike" = lowStrike, #"Upper Strike" = upStrike]})
+    ),
+    #"Final Table" = Table.FromRecords(#"Final Struct Logic", Value.Type(Table.AddColumn(Table.AddColumn(#"Combined Result", "Lower Strike", each null), "Upper Strike", each null))),
