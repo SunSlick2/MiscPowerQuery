@@ -1,0 +1,43 @@
+let
+    // Reference the original query output
+    Source = #"Section_J Cash",
+
+    // Group by Maturity and Pair to get the components for all 3 rows at once
+    Grouped = Table.Group(Source, {"UL Maturity", "Ccy Pair"}, {
+        {"PosBase", each List.Sum(Table.SelectRows(_, each [#"Notional (BaseCcy)"] > 0)[#"Notional (BaseCcy)"]), type number},
+        {"PosQuoted", each List.Sum(Table.SelectRows(_, each [#"Notional (BaseCcy)"] > 0)[#"Notional (QuotedCcy)"]), type number},
+        {"PosCover", each List.Sum(Table.SelectRows(_, each [#"Notional (BaseCcy)"] > 0)[#"Basic Cover"]), type number},
+        
+        {"NegBase", each List.Sum(Table.SelectRows(_, each [#"Notional (BaseCcy)"] < 0)[#"Notional (BaseCcy)"]), type number},
+        {"NegQuoted", each List.Sum(Table.SelectRows(_, each [#"Notional (BaseCcy)"] < 0)[#"Notional (QuotedCcy)"]), type number},
+        {"NegCover", each List.Sum(Table.SelectRows(_, each [#"Notional (BaseCcy)"] < 0)[#"Basic Cover"]), type number},
+        
+        {"NetBase", each List.Sum([#"Notional (BaseCcy)"]), type number},
+        {"NetQuoted", each List.Sum([#"Notional (QuotedCcy)"]), type number},
+        {"NetCover", each List.Sum([#"Basic Cover"]), type number}
+    }),
+
+    // Replace any nulls (where a category didn't exist) with 0
+    ZeroNulls = Table.ReplaceValue(Grouped, null, 0, Replacer.ReplaceValue, 
+        {"PosBase", "PosQuoted", "PosCover", "NegBase", "NegQuoted", "NegCover"}),
+
+    // Create the three distinct rows per group using a List of Records
+    ExpandRows = Table.AddColumn(ZeroNulls, "Rows", each {
+        [Type = "1. Positive Base", Base = [PosBase], Quoted = [PosQuoted], Cover = [PosCover]],
+        [Type = "2. Negative Base", Base = [NegBase], Quoted = [NegQuoted], Cover = [NegCover]],
+        [Type = "3. Net",           Base = [NetBase], Quoted = [NetQuoted], Cover = [NetCover]]
+    }),
+
+    // Cleanup and Final Layout
+    RemovedColumns = Table.RemoveColumns(ExpandRows,{"PosBase", "PosQuoted", "PosCover", "NegBase", "NegQuoted", "NegCover", "NetBase", "NetQuoted", "NetCover"}),
+    FinalRows = Table.ExpandListColumn(RemovedColumns, "Rows"),
+    Expanded = Table.ExpandRecordColumn(FinalRows, "Rows", {"Type", "Base", "Quoted", "Cover"}),
+    
+    // Rename columns back to original headers
+    Renamed = Table.RenameColumns(Expanded, {
+        {"Base", "Notional (BaseCcy)"}, 
+        {"Quoted", "Notional (QuotedCcy)"}, 
+        {"Cover", "Basic Cover"}
+    })
+in
+    Renamed
