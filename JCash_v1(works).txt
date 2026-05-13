@@ -1,0 +1,154 @@
+let
+    /***********************
+     * 1. Extraction (Existing Logic)
+     ***********************/
+    NamedRanges      = Excel.CurrentWorkbook(),
+    TSVPathRow       = Table.SelectRows(NamedRanges, each [Name] = "TSVFileFullPath"),
+    TSVPathTable     = if Table.RowCount(TSVPathRow) = 0 then error "Named range 'TSVFileFullPath' not found." else TSVPathRow{0}[Content],
+    FilePath         = TSVPathTable{0}[Column1],
+    FileText         = Text.FromBinary(File.Contents(FilePath)),
+    LinesList        = Lines.FromText(FileText),
+    LinesTable       = Table.FromList(LinesList, Splitter.SplitByNothing(), {"Line"}, null, ExtraValues.Error),
+    LinesWithIndex   = Table.AddIndexColumn(LinesTable, "Index", 0, 1, Int64.Type),
+    StartRowTbl      = Table.SelectRows(LinesWithIndex, each Text.Contains([Line], "TRADES AND OPTIONS:")),
+    StartIndex       = if Table.RowCount(StartRowTbl) = 0 then error "Start marker not found." else StartRowTbl{0}[Index],
+    EndRowTbl        = Table.SelectRows(LinesWithIndex, each Text.Contains([Line], "CURRENCY PAIRS:")),
+    EndIndex         = if Table.RowCount(EndRowTbl) = 0 then error "End marker not found." else EndRowTbl{0}[Index]-3,
+    BetweenMarkers   = Table.SelectRows(LinesWithIndex, each [Index] > StartIndex and [Index] < EndIndex),
+    DataLines        = Table.RemoveColumns(BetweenMarkers, {"Index"}),
+    HeaderLine1      = DataLines{0}[Line],
+    HeaderLine2      = DataLines{1}[Line],
+    DataLinesOnly    = Table.Skip(DataLines, 2),
+    HeaderFields1    = Text.Split(HeaderLine1, "#(tab)"),
+    HeaderFields2    = Text.Split(HeaderLine2, "#(tab)"),
+    
+    HeaderColCount   = List.Min({List.Count(HeaderFields1), List.Count(HeaderFields2)}),
+
+    /***********************
+     * 2. Header & Table Setup
+     ***********************/
+    HeaderFields1Trim = List.FirstN(HeaderFields1, HeaderColCount),
+    HeaderFields2Trim = List.FirstN(HeaderFields2, HeaderColCount),
+    CombinedHeadersRaw = List.Transform({0..HeaderColCount - 1}, each 
+        let 
+            h1 = Text.Trim(HeaderFields1Trim{_}), 
+            h2 = Text.Trim(HeaderFields2Trim{_}) 
+        in 
+            if h2 <> "" then Text.Combine({h1, h2}, " ") else h1
+    ),
+    DedupHeaders = 
+        let 
+            list = CombinedHeadersRaw, 
+            result = List.Accumulate({0..List.Count(list)-1}, [Names = {}, Out = {}], (state, i) =>
+                let 
+                    baseName = if Text.Trim(list{i}) = "" then "Column" & Text.From(i+1) else list{i},
+                    occurrences = List.Count(List.Select(state[Names], (n) => n = baseName)),
+                    newName = if occurrences = 0 then baseName else baseName & "_" & Text.From(occurrences + 1)
+                in 
+                    [Names = state[Names] & { newName }, Out = state[Out] & { newName }]
+            )
+        in 
+            result[Out],
+
+    SplitToLists     = Table.AddColumn(DataLinesOnly, "Fields", each Text.Split([Line], "#(tab)")),
+    NormalisedLists  = List.Transform(
+        SplitToLists[Fields], 
+        each 
+            let 
+                padded = if List.Count(_) < HeaderColCount 
+                         then _ & List.Repeat({null}, HeaderColCount - List.Count(_)) 
+                         else _ 
+            in 
+                List.FirstN(padded, HeaderColCount)
+    ),
+    DataRaw          = Table.FromRows(NormalisedLists, DedupHeaders),
+
+    /***********************
+     * 2a. Early Column Removal
+     ***********************/
+    #"Removed Unneeded Early" = Table.RemoveColumns(
+        DataRaw,
+        {
+            "Strategy Ref", "ExtRef", "Barrier 1", "Barrier 2",
+            "Gamma Vol Tenor", "Vega Vol Tenor",
+            "Reval Vol", "Gamma Vol", "Vega Vol", "Delta (Risk)",
+            "Gamma (System-Base)", "Gamma Add-On Unnormalised",
+            "Constrained", "Vega (Base)", "Vega Add-On Unnormalised",
+            "Constrained_2", "Gamma+Vega Add-On Unnormalised",
+            "Expiry"
+        }
+    ),
+
+    /***********************
+     * 2b. Filter
+     ***********************/
+    #"Filtered Rows" = Table.SelectRows(#"Removed Unneeded Early", each ([Accumulator ExtRef] = "")),
+
+    /***********************
+     * 3. Robust Typing & Sort
+     ***********************/
+    // Numeric columns to keep and type
+    NumCols = {
+        "MTM",
+        "Basic Cover",
+        "Notional (BaseCcy)",
+        "Notional (QuotedCcy)"
+    },
+
+    Typed = Table.TransformColumns(
+        #"Filtered Rows", 
+        List.Transform(
+            NumCols, 
+            (colName) => 
+                { 
+                    colName, 
+                    each 
+                        let
+                            txt = Text.Trim(_),
+                            noCommas = Text.Replace(txt, ",", ""),
+                            normalized = 
+                                if Text.StartsWith(noCommas, "(") and Text.EndsWith(noCommas, ")") then 
+                                    "-" & Text.Trim(Text.Middle(noCommas, 1, Text.Length(noCommas)-2))
+                                else 
+                                    noCommas, 
+                            result = if normalized = "" or normalized = null then 0
+                                     else Number.FromText(normalized, "en-US")
+                        in 
+                            result
+                    , 
+                    type number
+                }
+        )
+    ),
+
+    // Convert UL Maturity to date (ddMMMyy) and sort on it
+    DateTyped = Table.TransformColumns(
+        Typed, 
+        {
+            {"UL Maturity", each Date.FromText(_, [Format="ddMMMyy", Culture="en-US"]), type date}
+        }
+    ),
+
+    SortedByULMaturity = Table.Sort(DateTyped,{{"UL Maturity", Order.Ascending}}),
+
+    /***********************
+     * 4. Final Column Selection
+     ***********************/
+    FinalColumns = {
+        "Ref",
+        "Ccy Pair",
+        "Base Ccy Op",
+        "Base Ccy",
+        "Notional (BaseCcy)",
+        "Quoted Ccy Op",
+        "Quoted Ccy",
+        "Notional (QuotedCcy)",
+        "UL Maturity",
+        "Strike",
+        "Reval Rate",
+        "Basic Cover"
+    },
+
+    Output = Table.SelectColumns(SortedByULMaturity, FinalColumns)
+in
+    Output
