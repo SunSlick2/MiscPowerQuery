@@ -1,0 +1,46 @@
+let
+    // Reference your original query output
+    Source = JCash_v1,
+
+    /***********************
+     * 1. Create the 3 Grouping Types
+     ***********************/
+    
+    // Logic (a): Positive Base Notionals
+    Positives = Table.SelectRows(Source, each [#"Notional (BaseCcy)"] > 0),
+    GroupPos = Table.Group(Positives, {"UL Maturity", "Ccy Pair"}, {
+        {"Notional (BaseCcy)", each List.Sum([#"Notional (BaseCcy)"]), type number},
+        {"Notional (QuotedCcy)", each List.Sum([#"Notional (QuotedCcy)"]), type number},
+        {"Basic Cover", each List.Sum([#"Basic Cover"]), type number}
+    }),
+    AddLabelA = Table.AddColumn(GroupPos, "Type", each "Positive Base"),
+
+    // Logic (b): Negative Base Notionals
+    Negatives = Table.SelectRows(Source, each [#"Notional (BaseCcy)"] < 0),
+    GroupNeg = Table.Group(Negatives, {"UL Maturity", "Ccy Pair"}, {
+        {"Notional (BaseCcy)", each List.Sum([#"Notional (BaseCcy)"]), type number},
+        {"Notional (QuotedCcy)", each List.Sum([#"Notional (QuotedCcy)"]), type number},
+        {"Basic Cover", each List.Sum([#"Basic Cover"]), type number}
+    }),
+    AddLabelB = Table.AddColumn(GroupNeg, "Type", each "Negative Base"),
+
+    // Logic (c): Total Net
+    GroupTotal = Table.Group(Source, {"UL Maturity", "Ccy Pair"}, {
+        {"Notional (BaseCcy)", each List.Sum([#"Notional (BaseCcy)"]), type number},
+        {"Notional (QuotedCcy)", each List.Sum([#"Notional (QuotedCcy)"]), type number},
+        {"Basic Cover", each List.Sum([#"Basic Cover"]), type number}
+    }),
+    AddLabelC = Table.AddColumn(GroupTotal, "Type", each "Total Net"),
+
+    /***********************
+     * 2. Combine and Organize
+     ***********************/
+    Combined = Table.Combine({AddLabelA, AddLabelB, AddLabelC}),
+    
+    // Sort so row 1, 2, and 3 for the same selection appear together
+    Sorted = Table.Sort(Combined,{{"UL Maturity", Order.Ascending}, {"Ccy Pair", Order.Ascending}, {"Type", Order.Descending}}),
+    
+    // Reorder columns to show the type clearly
+    FinalOutput = Table.SelectColumns(Sorted, {"UL Maturity", "Ccy Pair", "Type", "Notional (BaseCcy)", "Notional (QuotedCcy)", "Basic Cover"})
+in
+    FinalOutput
